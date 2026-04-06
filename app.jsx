@@ -1,7 +1,9 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, doc, setDoc, onSnapshot } from 'firebase/firestore';
+import { 
+  getFirestore, doc, setDoc, onSnapshot, updateDoc 
+} from 'firebase/firestore';
 import { 
   Calendar, Users, Settings, ChevronLeft, ChevronRight, 
   Trash2, Plus, Leaf, Droplets, Upload, CheckCircle2, 
@@ -9,9 +11,9 @@ import {
   Medal, Award, Crown, Star 
 } from 'lucide-react';
 
-// --- 1. CẤU HÌNH FIREBASE (THAY BẰNG THÔNG TIN THẬT CỦA BẠN TẠI ĐÂY) ---
+// --- 1. CẤU HÌNH FIREBASE (DÙNG THÔNG TIN TỪ HÌNH ẢNH CỦA BẠN) ---
 const firebaseConfig = {
-  apiKey: "AIzaSyC-HodBQeatCrJPLWcm96L6gLabVJvZKyw",
+  apiKey: "AIzaSyC-HodBQeatCrJPLWcm96L6gLabVJVZKyw",
   authDomain: "app-tuoi-cay-vvh.firebaseapp.com",
   projectId: "app-tuoi-cay-vvh",
   storageBucket: "app-tuoi-cay-vvh.firebasestorage.app",
@@ -33,98 +35,106 @@ const formatDate = (date) => {
   return `${year}/${month}/${day}`;
 };
 
-const isToday = (date) => {
-  const t = new Date();
-  return date.getDate() === t.getDate() && date.getMonth() === t.getMonth() && date.getFullYear() === t.getFullYear();
+const getBadgeInfo = (count) => {
+  if (count <= 3) return { label: "Người tưới cho có", color: "text-slate-400", bg: "bg-slate-100" };
+  if (count <= 5) return { label: "Người tập tưới", color: "text-blue-500", bg: "bg-blue-50" };
+  if (count <= 10) return { label: "Người tưới có tâm", color: "text-emerald-500", bg: "bg-emerald-50" };
+  return { label: "Người tưới cả thế giới", color: "text-amber-500", bg: "bg-amber-50" };
 };
 
 export default function App() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [step, setStep] = useState('loading');
+  
+  // App State
   const [calendarTitle, setCalendarTitle] = useState('');
   const [members, setMembers] = useState([]);
   const [epochDate, setEpochDate] = useState(null);
-  const [wateringDaysOverride, setWateringDaysOverride] = useState({});
-  const [swaps, setSwaps] = useState({});
   const [completed, setCompleted] = useState({});
+
+  // UI State
   const [currentDate, setCurrentDate] = useState(new Date());
   const [newMemberName, setNewMemberName] = useState('');
   const [newMemberTeam, setNewMemberTeam] = useState('');
+  const [showLeaderboard, setShowLeaderboard] = useState(false);
 
   // AUTH
   useEffect(() => {
-    signInAnonymously(auth);
+    signInAnonymously(auth).catch(err => console.error("Auth error:", err));
     return onAuthStateChanged(auth, (u) => { if (u) setUser(u); });
   }, []);
 
-  // SYNC DATA
+  // DATA SYNC
   useEffect(() => {
     if (!user) return;
+    
+    // Sync Settings
     const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'main');
-    const unsubConfig = onSnapshot(configRef, (snap) => {
-      if (snap.exists()) {
-        const d = snap.data();
-        setCalendarTitle(d.title || '');
-        setMembers(d.members || []);
-        if (d.epochDate) setEpochDate(new Date(d.epochDate));
-        setStep(d.members?.length > 0 ? 'dashboard' : 'setup');
-      } else { setStep('setup'); }
+    const unsubConfig = onSnapshot(configRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setCalendarTitle(data.title || '');
+        setMembers(data.members || []);
+        if (data.epochDate) setEpochDate(new Date(data.epochDate));
+        setStep(data.members?.length > 0 ? 'dashboard' : 'setup');
+      } else {
+        setStep('setup');
+      }
       setLoading(false);
     });
-    return () => unsubConfig();
+
+    // Sync Progress
+    const scheduleRef = doc(db, 'artifacts', appId, 'public', 'data', 'schedules', 'main');
+    const unsubSchedule = onSnapshot(scheduleRef, (docSnap) => {
+      if (docSnap.exists()) {
+        setCompleted(docSnap.data().completed || {});
+      }
+    });
+
+    return () => { unsubConfig(); unsubSchedule(); };
   }, [user]);
 
-  const handleAddMember = async (e) => {
-    e.preventDefault();
-    if (!newMemberName.trim()) return;
-    const updated = [...members, { id: Date.now().toString(), name: newMemberName, team: newMemberTeam }];
-    setMembers(updated);
-    const ref = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'main');
-    await setDoc(ref, { members: updated, title: calendarTitle, epochDate: Date.now() }, { merge: true });
-    setNewMemberName('');
-    setNewMemberTeam('');
+  const handleStartApp = async () => {
+    if (!calendarTitle || members.length === 0) return;
+    const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'main');
+    await setDoc(configRef, {
+      title: calendarTitle,
+      members: members,
+      epochDate: Date.now()
+    }, { merge: true });
     setStep('dashboard');
   };
 
-  if (loading) return <div className="flex h-screen items-center justify-center font-bold">Đang tải dữ liệu...</div>;
+  const toggleWatering = async (dateStr, memberId) => {
+    const scheduleRef = doc(db, 'artifacts', appId, 'public', 'data', 'schedules', 'main');
+    const key = `${dateStr}_${memberId}`;
+    const newCompleted = { ...completed, [key]: !completed[key] };
+    await setDoc(scheduleRef, { completed: newCompleted }, { merge: true });
+  };
 
-  if (step === 'setup') {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-        <div className="bg-white p-8 rounded-3xl shadow-xl w-full max-w-md">
-          <h1 className="text-2xl font-bold mb-6 text-center">Thiết lập App Tưới Cây</h1>
-          <form onSubmit={handleAddMember} className="space-y-4">
-            <input type="text" placeholder="Tên dự án..." className="w-full p-3 border rounded-xl" value={calendarTitle} onChange={e => setCalendarTitle(e.target.value)} />
-            <input type="text" placeholder="Tên thành viên..." className="w-full p-3 border rounded-xl" value={newMemberName} onChange={e => setNewMemberName(e.target.value)} />
-            <input type="text" placeholder="Team..." className="w-full p-3 border rounded-xl" value={newMemberTeam} onChange={e => setNewMemberTeam(e.target.value)} />
-            <button className="w-full bg-emerald-500 text-white p-3 rounded-xl font-bold">BẮT ĐẦU</button>
-          </form>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="min-h-screen bg-slate-50 p-4 md:p-8">
-      <div className="max-w-4xl mx-auto bg-white rounded-3xl shadow-lg p-6">
-        <header className="flex justify-between items-center mb-8">
-          <h1 className="text-2xl font-black text-emerald-600">{calendarTitle || "Lịch Tưới Cây"}</h1>
-          <div className="text-sm font-bold text-slate-400">{currentDate.getMonth() + 1} / {currentDate.getFullYear()}</div>
-        </header>
-        
-        <div className="grid grid-cols-7 gap-2">
-          {['T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'CN'].map(d => <div key={d} className="text-center text-xs font-bold text-slate-400">{d}</div>)}
-          {/* Calendar Logic đơn giản */}
-          {[...Array(31)].map((_, i) => (
-            <div key={i} className="aspect-square border rounded-xl flex items-center justify-center font-bold text-slate-400 hover:bg-emerald-50">
-              {i + 1}
-            </div>
-          ))}
-        </div>
-        
-        <button onClick={() => setStep('setup')} className="mt-8 text-xs text-slate-300 hover:text-emerald-500 transition-colors">Thiết lập lại hệ thống</button>
+  if (loading) return (
+    <div className="min-h-screen flex items-center justify-center bg-emerald-50">
+      <div className="text-center">
+        <Droplets className="w-12 h-12 text-emerald-500 animate-bounce mx-auto mb-4" />
+        <p className="font-bold text-emerald-800">Đang tải dữ liệu...</p>
       </div>
     </div>
   );
-}
+
+  // --- MÀN HÌNH SETUP (HÌNH image_7e32e5.png) ---
+  if (step === 'setup') {
+    return (
+      <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4 font-sans">
+        <div className="bg-white p-8 rounded-[40px] shadow-2xl w-full max-w-lg">
+          <div className="flex justify-center mb-6">
+            <div className="bg-emerald-500 p-4 rounded-3xl shadow-lg shadow-emerald-200">
+              <Leaf className="text-white w-8 h-8" />
+            </div>
+          </div>
+          <h1 className="text-3xl font-black text-slate-800 text-center mb-2">Thiết Lập Team</h1>
+          <p className="text-slate-400 text-center mb-8">Cùng nhau xây dựng môi trường làm việc xanh</p>
+
+          <div className="space-y-6">
+            <div>
+              <label className="text-xs font-bold text-slate-400 uppercase ml-2
